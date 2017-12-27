@@ -28,12 +28,14 @@ module Control.Monad.Progress (
   printComponentTime,
 
   -- * Combining progress
-  (C.>>>)
+  (C.>>>),
+  Arrow (..)
   ) where
 
 import Control.DeepSeq
 import Control.Monad       ( forM_, when )
 import Control.Monad.Trans ( MonadIO (..) )
+import Control.Arrow       ( Arrow (..) )
 import qualified Control.Category as C
 
 import Data.List           ( genericLength )
@@ -49,10 +51,20 @@ data WithProgress m a b where
   WithProgressM :: ((Double -> m ()) -> a -> m b)           -> WithProgress m a b
   Combine       :: WithProgress m b c -> WithProgress m a b -> WithProgress m a c
   SetWeight     :: Double             -> WithProgress m a b -> WithProgress m a b
+  First         ::                       WithProgress m a b -> WithProgress m (a,c) (b,c)
+  Second        ::                       WithProgress m a b -> WithProgress m (c,a) (c,b)
 
 instance C.Category (WithProgress m) where
   id  = Id
   (.) = Combine
+
+instance Monad m => Arrow (WithProgress m) where
+  arr = error "WithProgress instances cannot directly be instantiated from pure\
+              \ functions"
+  first   = First
+  second  = Second
+  f *** g = First f C.>>> Second g
+  f &&& g = WithProgressM (\_ b -> return (b,b)) C.>>> f *** g
 
 --------------------------------------------------------------------------------  
 -- Functionality
@@ -127,6 +139,9 @@ runWithProgress' (SetWeight w p)   r a = runWithProgress' p (r . (*w) . (/wp)) a
   wp = getWeight p
 runWithProgress' (Combine q p)     r a = runWithProgress' p r a >>= runWithProgress' q (r . (+wp)) where
   wp = getWeight p
+runWithProgress' (First p)         r (a,c) = runWithProgress' p r a >>= \b -> return (b,c)
+runWithProgress' (Second p)        r (c,a) = runWithProgress' p r a >>= \b -> return (c,b)
+  
 
 -- | Run the computation with progress reporting, and measure the time of each
 --   component and print that to the screen. This function can be used to decide
@@ -138,6 +153,8 @@ printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r wher
   f (SetWeight _ p)   a' = f p a'
   f (WithProgressM p) a' = p (const $ return ()) a'
   f (Combine q p)     a' = f p a' >>= \b -> printTime >> f q b
+  f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
+  f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
 
 -- | Print the current time to stdout
 printTime :: MonadIO m => m ()
@@ -149,3 +166,5 @@ getWeight Id                = 0
 getWeight (WithProgressM _) = 1
 getWeight (Combine p q)     = getWeight p + getWeight q
 getWeight (SetWeight w _)   = w
+getWeight (First p)         = getWeight p
+getWeight (Second p)        = getWeight p
