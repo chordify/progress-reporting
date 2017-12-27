@@ -44,7 +44,7 @@ import qualified Control.Category as C
 
 import Data.List            ( genericLength )
 import Data.IORef           ( newIORef, atomicModifyIORef', readIORef )
-import Data.Time            ( getCurrentTime, diffUTCTime, NominalDiffTime )
+import Data.Time            ( getCurrentTime, diffUTCTime )
 
 --------------------------------------------------------------------------------  
 -- Data type
@@ -121,14 +121,14 @@ setWeight = SetWeight
 --   used in combination with 'measureComponentTimes' to estimate the runtime
 --   of each component.
 --   This function erases all weights that already exist.
-setWeights :: [NominalDiffTime] -> WithProgress m a b -> WithProgress m a b
+setWeights :: [Double] -> WithProgress m a b -> WithProgress m a b
 setWeights times wp = case f times wp of
   ([], p') -> p'
   _        -> error "setWeights: The number of times is bigger than the number of components"
   where
-    f :: [NominalDiffTime] -> WithProgress m a b -> ([NominalDiffTime], WithProgress m a b)
+    f :: [Double] -> WithProgress m a b -> ([Double], WithProgress m a b)
     f    ts   Id               = (ts, Id)
-    f (t:ts) (WithProgressM p) = (ts, SetWeight (fromRational $ toRational t) (WithProgressM p))
+    f (t:ts) (WithProgressM p) = (ts, SetWeight t (WithProgressM p))
     f    ts  (SetWeight _ p)   = f ts p
     f    ts  (Combine q p)     = let (ts',p')  = f ts p
                                      (ts'',q') = f ts' q
@@ -199,16 +199,16 @@ printTime :: MonadIO m => m ()
 printTime = liftIO (getCurrentTime >>= print)
 
 -- | Measure the time of all components in a pipeline.
-measureComponentTimes :: MonadIO m => WithProgress m a b -> a -> m [NominalDiffTime]
+measureComponentTimes :: MonadIO m => WithProgress m a b -> a -> m [Double]
 measureComponentTimes c a = execWriterT $ f c a where
-  f :: MonadIO m => WithProgress m a b -> a -> WriterT [NominalDiffTime] m b
+  f :: MonadIO m => WithProgress m a b -> a -> WriterT [Double] m b
   f Id                a' = return a'
   f (SetWeight _ p)   a' = f p a'
   f (WithProgressM p) a' = do
     start <- liftIO getCurrentTime
     b <- lift $ p (const $ return ()) a'
     end <- liftIO getCurrentTime
-    tell [diffUTCTime end start]
+    tell [fromRational $ toRational $ diffUTCTime end start]
     return b
   f (Combine q p)     a' = f p a' >>= \b -> f q b
   f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
