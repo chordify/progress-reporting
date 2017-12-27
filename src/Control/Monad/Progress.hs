@@ -25,6 +25,7 @@ module Control.Monad.Progress (
   withProgressFromList,
   withProgressM,
   withProgressA,
+  withProgressFinally,
   setWeight,
   setWeights,
   printComponentTime,
@@ -39,6 +40,7 @@ import Control.DeepSeq
 import Control.Monad        ( forM_, when )
 import Control.Monad.Trans  ( MonadIO (..) )
 import Control.Monad.Writer ( WriterT, execWriterT, tell, lift )
+import Control.Monad.Catch  ( finally, MonadMask )
 import Control.Arrow        ( Arrow (..) )
 import qualified Control.Category as C
 
@@ -52,11 +54,12 @@ import Data.Time            ( getCurrentTime, diffUTCTime )
 
 data WithProgress m a b where
   Id            :: WithProgress m a a
-  WithProgressM :: ((Double -> m ()) -> a -> m b)           -> WithProgress m a b
-  Combine       :: WithProgress m b c -> WithProgress m a b -> WithProgress m a c
-  SetWeight     :: Double             -> WithProgress m a b -> WithProgress m a b
-  First         ::                       WithProgress m a b -> WithProgress m (a,c) (b,c)
-  Second        ::                       WithProgress m a b -> WithProgress m (c,a) (c,b)
+  WithProgressM :: ((Double -> m ()) -> a -> m b)                  -> WithProgress m a b
+  Combine       :: WithProgress m b c        -> WithProgress m a b -> WithProgress m a c
+  Finally       :: MonadMask m => (a -> m c) -> WithProgress m a b -> WithProgress m a b
+  SetWeight     :: Double                    -> WithProgress m a b -> WithProgress m a b
+  First         ::                              WithProgress m a b -> WithProgress m (a,c) (b,c)
+  Second        ::                              WithProgress m a b -> WithProgress m (c,a) (c,b)
 
 instance C.Category (WithProgress m) where
   id  = Id
@@ -112,6 +115,12 @@ withProgressA f = WithProgressM $ \report a -> do
   report 1
   r `deepseq` return r
 
+-- | Attach an exception handler from the 'Control.Monad.Catch' class
+--   to this pipeline, which is executed when the pipeline completes
+--   or an exception occurs.
+withProgressFinally :: MonadMask m => WithProgress m a b -> (a -> m c) -> WithProgress m a b
+withProgressFinally = flip Finally
+
 -- | Set the weight of a pipeline element (default is 1).
 setWeight :: Double -> WithProgress m a b -> WithProgress m a b
 setWeight = SetWeight
@@ -128,16 +137,18 @@ setWeights times wp = case f times wp of
   where
     f :: [Double] -> WithProgress m a b -> ([Double], WithProgress m a b)
     f    ts   Id               = (ts, Id)
+    f    []  (WithProgressM _) = error "setWeights: The number of times is smaller than the number of components"
     f (t:ts) (WithProgressM p) = (ts, SetWeight t (WithProgressM p))
     f    ts  (SetWeight _ p)   = f ts p
     f    ts  (Combine q p)     = let (ts',p')  = f ts p
                                      (ts'',q') = f ts' q
                                  in  (ts'', Combine q' p')
+    f    ts  (Finally g p)     = let (ts',p')  = f ts p
+                                 in  (ts', Finally g p')
     f    ts  (First p)         = let (ts',p')  = f ts p
                                  in  (ts',First p')
     f    ts  (Second p)        = let (ts',p')  = f ts p
                                  in  (ts',Second p')
-    f _  _ = error "setWeights: The number of times is smaller than the number of components"
 
 -- | Construct a function that reports its own progress. This function must call
 --   the given function to report progress as a fraction between 0 and 1.
@@ -177,9 +188,9 @@ runWithProgress' (SetWeight w p)   r a = runWithProgress' p (r . (*w) . (/wp)) a
   wp = getWeight p
 runWithProgress' (Combine q p)     r a = runWithProgress' p r a >>= runWithProgress' q (r . (+wp)) where
   wp = getWeight p
+runWithProgress' (Finally g p)     r a = runWithProgress' p r a `finally` g a
 runWithProgress' (First p)         r (a,c) = runWithProgress' p r a >>= \b -> return (b,c)
 runWithProgress' (Second p)        r (c,a) = runWithProgress' p r a >>= \b -> return (c,b)
-  
 
 -- | Run the computation with progress reporting, and measure the time of each
 --   component and print that to the screen. This function can be used to decide
@@ -191,6 +202,7 @@ printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r wher
   f (SetWeight _ p)   a' = f p a'
   f (WithProgressM p) a' = p (const $ return ()) a'
   f (Combine q p)     a' = f p a' >>= \b -> printTime >> f q b
+  f (Finally g p)     a' = f p a' `finally` g a'
   f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
 
@@ -211,6 +223,7 @@ measureComponentTimes c a = execWriterT $ f c a where
     tell [fromRational $ toRational $ diffUTCTime end start]
     return b
   f (Combine q p)     a' = f p a' >>= \b -> f q b
+  f (Finally _ p)     a' = f p a'
   f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
 
@@ -219,6 +232,7 @@ getWeight :: WithProgress m a b -> Double
 getWeight Id                = 0
 getWeight (WithProgressM _) = 1
 getWeight (Combine p q)     = getWeight p + getWeight q
+getWeight (Finally _ p)     = getWeight p
 getWeight (SetWeight w _)   = w
 getWeight (First p)         = getWeight p
 getWeight (Second p)        = getWeight p
