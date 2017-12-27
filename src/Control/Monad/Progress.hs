@@ -24,6 +24,7 @@ module Control.Monad.Progress (
   runWithPercentage,
   withProgressFromList,
   withProgressM,
+  withProgressA,
   setWeight,
   printComponentTime,
 
@@ -96,6 +97,15 @@ withProgressFromList f = WithProgressM ret where
 
     -- Return the output
     return output
+
+-- | Lift an atomic monadic function to the progress reporting arrow. The result
+--   is evaluated with 'deepseq' before being returned. Note that this function
+--   should not be used for time consuming functions, use 'withProgressM' for
+--   that instead to report intermediate progress!
+withProgressA :: (Monad m, NFData b) => (a -> m b) -> WithProgress m a b
+withProgressA f = WithProgressM $ \_ a -> do
+  r <- f a
+  r `deepseq` return r
 
 -- | Set the weight of a pipeline element (default is 1).
 setWeight :: Double -> WithProgress m a b -> WithProgress m a b
