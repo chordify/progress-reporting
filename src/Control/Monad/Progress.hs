@@ -103,8 +103,10 @@ withProgressFromList f = WithProgressM ret where
 --   should not be used for time consuming functions, use 'withProgressM' for
 --   that instead to report intermediate progress!
 withProgressA :: (Monad m, NFData b) => (a -> m b) -> WithProgress m a b
-withProgressA f = WithProgressM $ \_ a -> do
+withProgressA f = WithProgressM $ \report a -> do
+  report 0
   r <- f a
+  report 1
   r `deepseq` return r
 
 -- | Set the weight of a pipeline element (default is 1).
