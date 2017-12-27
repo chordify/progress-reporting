@@ -26,7 +26,9 @@ module Control.Monad.Progress (
   withProgressM,
   withProgressA,
   setWeight,
+  setWeights,
   printComponentTime,
+  measureComponentTimes,
 
   -- * Combining progress
   (C.>>>),
@@ -34,14 +36,15 @@ module Control.Monad.Progress (
   ) where
 
 import Control.DeepSeq
-import Control.Monad       ( forM_, when )
-import Control.Monad.Trans ( MonadIO (..) )
-import Control.Arrow       ( Arrow (..) )
+import Control.Monad        ( forM_, when )
+import Control.Monad.Trans  ( MonadIO (..) )
+import Control.Monad.Writer ( WriterT, execWriterT, tell, lift )
+import Control.Arrow        ( Arrow (..) )
 import qualified Control.Category as C
 
-import Data.List           ( genericLength )
-import Data.IORef          ( newIORef, atomicModifyIORef', readIORef )
-import Data.Time           ( getCurrentTime )
+import Data.List            ( genericLength )
+import Data.IORef           ( newIORef, atomicModifyIORef', readIORef )
+import Data.Time            ( getCurrentTime, diffUTCTime, NominalDiffTime )
 
 --------------------------------------------------------------------------------  
 -- Data type
@@ -113,6 +116,29 @@ withProgressA f = WithProgressM $ \report a -> do
 setWeight :: Double -> WithProgress m a b -> WithProgress m a b
 setWeight = SetWeight
 
+-- | Set the weight of all components in the given pipeline. Note that the length
+--   of the list must match the number of components exactly. This function is
+--   used in combination with 'measureComponentTimes' to estimate the runtime
+--   of each component.
+--   This function erases all weights that already exist.
+setWeights :: [NominalDiffTime] -> WithProgress m a b -> WithProgress m a b
+setWeights times wp = case f times wp of
+  ([], p') -> p'
+  _        -> error "setWeights: The number of times is bigger than the number of components"
+  where
+    f :: [NominalDiffTime] -> WithProgress m a b -> ([NominalDiffTime], WithProgress m a b)
+    f    ts   Id               = (ts, Id)
+    f (t:ts) (WithProgressM p) = (ts, SetWeight (fromRational $ toRational t) (WithProgressM p))
+    f    ts  (SetWeight _ p)   = f ts p
+    f    ts  (Combine q p)     = let (ts',p')  = f ts p
+                                     (ts'',q') = f ts' q
+                                 in  (ts'', Combine q' p')
+    f    ts  (First p)         = let (ts',p')  = f ts p
+                                 in  (ts',First p')
+    f    ts  (Second p)        = let (ts',p')  = f ts p
+                                 in  (ts',Second p')
+    f _  _ = error "setWeights: The number of times is smaller than the number of components"
+
 -- | Construct a function that reports its own progress. This function must call
 --   the given function to report progress as a fraction between 0 and 1.
 withProgressM :: ((Double -> m ()) -> a -> m b) -> WithProgress m a b
@@ -171,6 +197,22 @@ printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r wher
 -- | Print the current time to stdout
 printTime :: MonadIO m => m ()
 printTime = liftIO (getCurrentTime >>= print)
+
+-- | Measure the time of all components in a pipeline.
+measureComponentTimes :: MonadIO m => WithProgress m a b -> a -> m [NominalDiffTime]
+measureComponentTimes c a = execWriterT $ f c a where
+  f :: MonadIO m => WithProgress m a b -> a -> WriterT [NominalDiffTime] m b
+  f Id                a' = return a'
+  f (SetWeight _ p)   a' = f p a'
+  f (WithProgressM p) a' = do
+    start <- liftIO getCurrentTime
+    b <- lift $ p (const $ return ()) a'
+    end <- liftIO getCurrentTime
+    tell [diffUTCTime end start]
+    return b
+  f (Combine q p)     a' = f p a' >>= \b -> f q b
+  f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
+  f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
 
 -- | Get the weight of a computation with progress
 getWeight :: WithProgress m a b -> Double
