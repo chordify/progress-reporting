@@ -41,7 +41,7 @@ import Control.Monad        ( forM_, when )
 import Control.Monad.Trans  ( MonadIO (..) )
 import Control.Monad.Writer ( WriterT, execWriterT, tell, lift )
 import Control.Monad.Catch  ( finally, MonadMask )
-import Control.Arrow        ( Arrow (..) )
+import Control.Arrow        ( Arrow (..), ArrowChoice (..) )
 import qualified Control.Category as C
 
 import Data.List            ( genericLength )
@@ -60,6 +60,7 @@ data WithProgress m a b where
   SetWeight     :: Double                    -> WithProgress m a b -> WithProgress m a b
   First         ::                              WithProgress m a b -> WithProgress m (a,c) (b,c)
   Second        ::                              WithProgress m a b -> WithProgress m (c,a) (c,b)
+  LeftA         ::                              WithProgress m a b -> WithProgress m (Either a c) (Either b c)
 
 instance C.Category (WithProgress m) where
   id  = Id
@@ -73,6 +74,16 @@ instance Monad m => Arrow (WithProgress m) where
   f *** g = First f C.>>> Second g
   f &&& g = WithProgressM (\_ b -> return (b,b)) C.>>> f *** g
 
+instance Monad m => ArrowChoice (WithProgress m) where
+  left = LeftA
+  right f = mirror C.>>> left f C.>>> mirror where
+    mirror :: WithProgress m (Either a b) (Either b a)
+    mirror = WithProgressM $ \_ x -> case x of
+      Left y  -> return $ Right y
+      Right y -> return $ Left y
+  (+++) = error "+++ is not implemented for WithProgress"
+  (|||) = error "||| is not implemented for WithProgress"
+  
 --------------------------------------------------------------------------------  
 -- Functionality
 --------------------------------------------------------------------------------
@@ -149,6 +160,8 @@ setWeights times wp = case f times wp of
                                  in  (ts',First p')
     f    ts  (Second p)        = let (ts',p')  = f ts p
                                  in  (ts',Second p')
+    f    ts  (LeftA p)         = let (ts',p')  = f ts p
+                                 in  (ts',LeftA p')
 
 -- | Construct a function that reports its own progress. This function must call
 --   the given function to report progress as a fraction between 0 and 1.
@@ -191,6 +204,8 @@ runWithProgress' (Combine q p)     r a = runWithProgress' p r a >>= runWithProgr
 runWithProgress' (Finally g p)     r a = runWithProgress' p r a `finally` g a
 runWithProgress' (First p)         r (a,c) = runWithProgress' p r a >>= \b -> return (b,c)
 runWithProgress' (Second p)        r (c,a) = runWithProgress' p r a >>= \b -> return (c,b)
+runWithProgress' (LeftA p)         r (Left a) = runWithProgress' p r a >>= \b -> return (Left b)
+runWithProgress' (LeftA _)         r (Right b) = r 1 >> return (Right b)
 
 -- | Run the computation with progress reporting, and measure the time of each
 --   component and print that to the screen. This function can be used to decide
@@ -205,6 +220,8 @@ printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r wher
   f (Finally g p)     a' = f p a' `finally` g a'
   f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
+  f (LeftA p)         (Left a') = f p a' >>= \b -> return (Left b)
+  f (LeftA _)         (Right _) = error "printComponentTime: Empty branch of ArrowChoice reached, this should not be the case with time measurements"
 
 -- | Print the current time to stdout
 printTime :: MonadIO m => m ()
@@ -226,6 +243,8 @@ measureComponentTimes c a = execWriterT $ f c a where
   f (Finally _ p)     a' = f p a'
   f (First p)         (a',c') = f p a' >>= \b -> return (b,c')
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
+  f (LeftA p)         (Left a') = f p a' >>= \b -> return (Left b)
+  f (LeftA _)         (Right _) = error "measureComponentTimes: Empty branch of ArrowChoice reached, this should not be the case with time measurements"
 
 -- | Get the weight of a computation with progress
 getWeight :: WithProgress m a b -> Double
@@ -236,3 +255,4 @@ getWeight (Finally _ p)     = getWeight p
 getWeight (SetWeight w _)   = w
 getWeight (First p)         = getWeight p
 getWeight (Second p)        = getWeight p
+getWeight (LeftA p)         = getWeight p
