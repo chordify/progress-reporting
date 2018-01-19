@@ -1,5 +1,5 @@
 name:                progress-reporting
-version:             1.1.0
+version:             1.2.0
 synopsis:            Functionality for reporting function progress.
 description:         This module provides a set of functions for writing
                      functions that report their own progress in a monadic
