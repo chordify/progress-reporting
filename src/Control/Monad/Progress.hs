@@ -33,7 +33,8 @@ module Control.Monad.Progress (
 
   -- * Combining progress
   (C.>>>),
-  Arrow (..)
+  Arrow (..),
+  ArrowChoice (..)
   ) where
 
 import Control.DeepSeq
