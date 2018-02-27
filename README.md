@@ -1,0 +1,1 @@
+This module provides a set of functions for writing functions that report their own progress in a monadic context, which can be evaluated to get progress reports while time-consuming functions are running.
