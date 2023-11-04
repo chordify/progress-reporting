@@ -68,7 +68,7 @@ instance C.Category (WithProgress m) where
   (.) = Combine
 
 instance Monad m => Arrow (WithProgress m) where
-  arr fun = WithProgressM (\_ b -> pure $ fun b)
+  arr fun = WithProgressM (\report b -> fun b <$ report 1) -- haskell is lazy so this completes instantly
   first   = First
   second  = Second
   f *** g = First f C.>>> Second g
