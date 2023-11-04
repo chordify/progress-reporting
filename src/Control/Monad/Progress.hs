@@ -68,8 +68,7 @@ instance C.Category (WithProgress m) where
   (.) = Combine
 
 instance Monad m => Arrow (WithProgress m) where
-  arr = error "WithProgress instances cannot directly be instantiated from pure\
-              \ functions"
+  arr fun = WithProgressM (\_ b -> pure $ fun b)
   first   = First
   second  = Second
   f *** g = First f C.>>> Second g
@@ -82,9 +81,7 @@ instance Monad m => ArrowChoice (WithProgress m) where
     mirror = WithProgressM $ \_ x -> case x of
       Left y  -> return $ Right y
       Right y -> return $ Left y
-  (+++) = error "+++ is not implemented for WithProgress"
-  (|||) = error "||| is not implemented for WithProgress"
-  
+
 --------------------------------------------------------------------------------  
 -- Functionality
 --------------------------------------------------------------------------------
