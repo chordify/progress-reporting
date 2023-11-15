@@ -124,8 +124,8 @@ withProgressA :: (Monad m, NFData b) => (a -> m b) -> WithProgress m a b
 withProgressA f = WithProgressM $ \report a -> do
   report 0
   r <- f a
-  report 1
-  r `deepseq` return r
+  r `deepseq` report 1
+  return r
 
 -- | Attach an exception handler from the 'Control.Monad.Catch' class
 --   to this pipeline, which is executed when the pipeline completes
