@@ -34,19 +34,19 @@ module Control.Monad.Progress (
   -- * Combining progress
   (C.>>>),
   Arrow (..),
-  ArrowChoice (..)
+  ArrowChoice (..),
+  (*|*),
+  (&|&)
   ) where
-
+import Prelude
 import Control.DeepSeq
+import UnliftIO
 import Control.Monad        ( forM_, when )
-import Control.Monad.Trans  ( MonadIO (..) )
 import Control.Monad.Writer ( WriterT, execWriterT, tell, lift )
-import Control.Monad.Catch  ( finally, MonadMask )
 import Control.Arrow        ( Arrow (..), ArrowChoice (..) )
 import qualified Control.Category as C
 
 import Data.List            ( genericLength )
-import Data.IORef           ( newIORef, atomicModifyIORef', readIORef )
 import Data.Time            ( getCurrentTime, diffUTCTime )
 
 --------------------------------------------------------------------------------
@@ -57,11 +57,12 @@ data WithProgress m a b where
   Id            :: WithProgress m a a
   WithProgressM :: ((Double -> m ()) -> a -> m b)                  -> WithProgress m a b
   Combine       :: WithProgress m b c        -> WithProgress m a b -> WithProgress m a c
-  Finally       :: MonadMask m => (a -> m c) -> WithProgress m a b -> WithProgress m a b
+  Finally       :: (a -> m c)                -> WithProgress m a b -> WithProgress m a b
   SetWeight     :: Double                    -> WithProgress m a b -> WithProgress m a b
   First         ::                              WithProgress m a b -> WithProgress m (a,c) (b,c)
   Second        ::                              WithProgress m a b -> WithProgress m (c,a) (c,b)
   LeftA         ::                              WithProgress m a b -> WithProgress m (Either a c) (Either b c)
+  Parallel      :: WithProgress m a b        -> WithProgress m c d -> WithProgress m (a, c) (b, d)
 
 instance C.Category (WithProgress m) where
   id  = Id
@@ -73,7 +74,25 @@ instance Monad m => Arrow (WithProgress m) where
   first   = First
   second  = Second
   f *** g = First f C.>>> Second g
-  f &&& g = WithProgressM (\_ b -> return (b,b)) C.>>> f *** g
+  f &&& g = withProgressM (\_ b -> return (b,b)) C.>>> f *** g
+
+
+infixr 3 *|*
+infixr 3 &|&
+
+-- | A parallel version (for WithProgress) of (***)
+(*|*) ::
+  WithProgress m b c
+  -> WithProgress m b' c'
+  -> WithProgress m (b, b') (c, c')
+(*|*) = Parallel
+
+-- | A parallel version (for WithProgress) of (&&&)
+(&|&) :: Monad m
+  => WithProgress m b c
+  -> WithProgress m b c'
+  -> WithProgress m b (c, c')
+(&|&) f g = withProgressM (\_ b -> return (b,b)) C.>>> f *|* g
 
 instance Monad m => ArrowChoice (WithProgress m) where
   left = LeftA
@@ -121,16 +140,15 @@ withProgressFromList f = WithProgressM ret where
 --   should not be used for time consuming functions, use 'withProgressM' for
 --   that instead to report intermediate progress!
 withProgressA :: (Monad m, NFData b) => (a -> m b) -> WithProgress m a b
-withProgressA f = WithProgressM $ \report a -> do
-  report 0
+withProgressA f = WithProgressM $ \_ a -> do
   r <- f a
-  r `deepseq` report 1
+  r `deepseq` return ()
   return r
 
 -- | Attach an exception handler from the 'Control.Monad.Catch' class
 --   to this pipeline, which is executed when the pipeline completes
 --   or an exception occurs.
-withProgressFinally :: MonadMask m => WithProgress m a b -> (a -> m c) -> WithProgress m a b
+withProgressFinally :: WithProgress m a b -> (a -> m c) -> WithProgress m a b
 withProgressFinally = flip Finally
 
 -- | Set the weight of a pipeline element (default is 1).
@@ -163,6 +181,9 @@ setWeights times wp = case f times wp of
                                  in  (ts',Second p')
     f    ts  (LeftA p)         = let (ts',p')  = f ts p
                                  in  (ts',LeftA p')
+    f    ts  (Parallel p q)    = let (ts',p') = f ts p
+                                     (ts'',q') = f ts' q
+                                 in  (ts'',Parallel p' q')
 
 -- | Construct a function that reports its own progress. This function must call
 --   the given function to report progress as a fraction between 0 and 1.
@@ -171,14 +192,14 @@ withProgressM f = WithProgressM f
 
 -- | Run a computation with progress reporting. The given function will be called
 --   each time the progress is updated, and the number is always between 0 and 1.
-runWithProgress :: Monad m => WithProgress m a b -> (Double -> m ()) -> a -> m b
+runWithProgress :: MonadUnliftIO m => WithProgress m a b -> (Double -> m ()) -> a -> m b
 runWithProgress Id r a = r 1 >> return a
 runWithProgress p  r a = runWithProgress' p (r . (/w)) a where
   w = getWeight p
 
 -- | Run a computation with progress reporting. The given function will be called
---   at most once per percentage, which is a number between 0 and 100.
-runWithPercentage :: MonadIO m => WithProgress m a b -> (Int -> m ()) -> a -> m b
+--   at most once per percentage, and always increasing, which is a number between 0 and 100.
+runWithPercentage :: MonadUnliftIO m => WithProgress m a b -> (Int -> m ()) -> a -> m b
 runWithPercentage Id r a = r 100 >> return a
 runWithPercentage p  r a = do
   let w = getWeight p
@@ -186,7 +207,7 @@ runWithPercentage p  r a = do
   prevR <- liftIO $ newIORef 0
   let report d = do
         let new = floor $ (/w) $ (*100) d
-        isNew <- liftIO $ atomicModifyIORef' prevR $ \prev -> (new, prev /= new)
+        isNew <- liftIO $ atomicModifyIORef' prevR $ \prev -> (new `max` prev, prev < new)
         when isNew $ r new
   ret <- runWithProgress' p report a
   final <- liftIO $ readIORef prevR
@@ -195,9 +216,13 @@ runWithPercentage p  r a = do
 
 -- | Internal function for actually running the computation, which does not do the
 --   scaling of the total weight, so the reported number is between 0 and getWeight p
-runWithProgress' :: Monad m => WithProgress m a b -> (Double -> m ()) -> a -> m b
+runWithProgress' :: MonadUnliftIO m => WithProgress m a b -> (Double -> m ()) -> a -> m b
 runWithProgress' Id                _ a = return a
-runWithProgress' (WithProgressM p) r a = p r a
+runWithProgress' (WithProgressM p) r a = do
+  r 0
+  res <- p r a
+  r 1
+  return res
 runWithProgress' (SetWeight w p)   r a = runWithProgress' p (r . (*w) . (/wp)) a where
   wp = getWeight p
 runWithProgress' (Combine q p)     r a = runWithProgress' p r a >>= runWithProgress' q (r . (+wp)) where
@@ -207,13 +232,17 @@ runWithProgress' (First p)         r (a,c) = runWithProgress' p r a >>= \b -> re
 runWithProgress' (Second p)        r (c,a) = runWithProgress' p r a >>= \b -> return (c,b)
 runWithProgress' (LeftA p)         r (Left a) = runWithProgress' p r a >>= \b -> return (Left b)
 runWithProgress' (LeftA _)         r (Right b) = r 1 >> return (Right b)
+runWithProgress' f@(Parallel p q)  r (a,c) = concurrently (runWithProgress' p (r . (*wp) . (/wf)) a) (runWithProgress' q (r . (*wq) . (/wf)) c) where
+  wp = getWeight p
+  wq = getWeight q
+  wf = getWeight f
 
 -- | Run the computation with progress reporting, and measure the time of each
 --   component and print that to the screen. This function can be used to decide
 --   what the weight of each component should be.
-printComponentTime :: MonadIO m => WithProgress m a b -> a -> m b
+printComponentTime :: MonadUnliftIO m => WithProgress m a b -> a -> m b
 printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r where
-  f :: MonadIO m => WithProgress m a b -> a -> m b
+  f :: MonadUnliftIO m => WithProgress m a b -> a -> m b
   f Id                a' = return a'
   f (SetWeight _ p)   a' = f p a'
   f (WithProgressM p) a' = p (const $ return ()) a'
@@ -223,15 +252,16 @@ printComponentTime c a = printTime >> f c a >>= \r -> printTime >> return r wher
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
   f (LeftA p)         (Left a') = f p a' >>= \b -> return (Left b)
   f (LeftA _)         (Right _) = error "printComponentTime: Empty branch of ArrowChoice reached, this should not be the case with time measurements"
+  f (Parallel p q)    (a', c') = concurrently (f p a') (f q c')
 
 -- | Print the current time to stdout
 printTime :: MonadIO m => m ()
 printTime = liftIO (getCurrentTime >>= print)
 
 -- | Measure the time of all components in a pipeline.
-measureComponentTimes :: MonadIO m => WithProgress m a b -> a -> m [Double]
+measureComponentTimes :: MonadUnliftIO m => WithProgress m a b -> a -> m [Double]
 measureComponentTimes c a = execWriterT $ f c a where
-  f :: MonadIO m => WithProgress m a b -> a -> WriterT [Double] m b
+  f :: MonadUnliftIO m => WithProgress m a b -> a -> WriterT [Double] m b
   f Id                a' = return a'
   f (SetWeight _ p)   a' = f p a'
   f (WithProgressM p) a' = do
@@ -246,6 +276,7 @@ measureComponentTimes c a = execWriterT $ f c a where
   f (Second p)        (c',a') = f p a' >>= \b -> return (c',b)
   f (LeftA p)         (Left a') = f p a' >>= \b -> return (Left b)
   f (LeftA _)         (Right _) = error "measureComponentTimes: Empty branch of ArrowChoice reached, this should not be the case with time measurements"
+  f (Parallel p q)    (a',c') = (,) <$> f p a' <*> f q c'
 
 -- | Get the weight of a computation with progress
 getWeight :: WithProgress m a b -> Double
@@ -257,3 +288,4 @@ getWeight (SetWeight w _)   = w
 getWeight (First p)         = getWeight p
 getWeight (Second p)        = getWeight p
 getWeight (LeftA p)         = getWeight p
+getWeight (Parallel p q)    = getWeight p `max` getWeight q
