@@ -49,7 +49,7 @@ import Data.List            ( genericLength )
 import Data.IORef           ( newIORef, atomicModifyIORef', readIORef )
 import Data.Time            ( getCurrentTime, diffUTCTime )
 
---------------------------------------------------------------------------------  
+--------------------------------------------------------------------------------
 -- Data type
 --------------------------------------------------------------------------------
 
@@ -84,8 +84,8 @@ instance Monad m => ArrowChoice (WithProgress m) where
       Right y -> return $ Left y
   (+++) = error "+++ is not implemented for WithProgress"
   (|||) = error "||| is not implemented for WithProgress"
-  
---------------------------------------------------------------------------------  
+
+--------------------------------------------------------------------------------
 -- Functionality
 --------------------------------------------------------------------------------
 
@@ -99,7 +99,7 @@ withProgressFromList f = WithProgressM ret where
   ret report input = do
     -- Start with reporting 0 progress
     report 0
-    
+
     -- First construct output list to find its length
     let output = f input
     let len :: Double
@@ -190,7 +190,7 @@ runWithPercentage p  r a = do
         when isNew $ r new
   ret <- runWithProgress' p report a
   final <- liftIO $ readIORef prevR
-  when (final /= 100) $ report 100
+  when (final /= 100) $ r 100
   return ret
 
 -- | Internal function for actually running the computation, which does not do the
