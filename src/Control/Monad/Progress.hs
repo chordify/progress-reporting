@@ -220,9 +220,7 @@ runWithProgress' :: MonadUnliftIO m => WithProgress m a b -> (Double -> m ()) ->
 runWithProgress' Id                _ a = return a
 runWithProgress' (WithProgressM p) r a = do
   r 0
-  res <- p r a
-  r 1
-  return res
+  p r a `finally` r 1
 runWithProgress' (SetWeight w p)   r a = runWithProgress' p (r . (*w) . (/wp)) a where
   wp = getWeight p
 runWithProgress' (Combine q p)     r a = runWithProgress' p r a >>= runWithProgress' q (r . (+wp)) where
